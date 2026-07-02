@@ -1,0 +1,24 @@
+# Build artifacts
+*.dylib
+*.so
+*.dll
+*.h
+
+# Go build/test tmp
+first_errors.log
+build*.log
+first_build_errors.log
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
+
+# Coverage
+*.out
+coverage.*
+
+# Local run outputs
+/tmp/
