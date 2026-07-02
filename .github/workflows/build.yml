@@ -1,0 +1,141 @@
+name: Build + Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# The plugin's go.mod carries a local `replace` directive pointing at the
+# CLIProxyAPI host as a sibling directory named CLIProxyAPIPlus. Every job
+# below reconstructs that layout by checking the host repo out under that
+# exact path, so no CI-only go.mod edits are needed.
+
+jobs:
+  build:
+    name: build (${{ matrix.goos }}/${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            arch: amd64
+            ext: so
+          - os: ubuntu-24.04-arm
+            goos: linux
+            arch: arm64
+            ext: so
+          - os: macos-13
+            goos: darwin
+            arch: amd64
+            ext: dylib
+          - os: macos-latest
+            goos: darwin
+            arch: arm64
+            ext: dylib
+          - os: windows-latest
+            goos: windows
+            arch: amd64
+            ext: dll
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@v4
+        with:
+          path: cpa-plugin-copilot
+
+      # go.mod uses `replace github.com/router-for-me/CLIProxyAPI/v7 => ../CLIProxyAPIPlus`
+      # so we check the host out at that exact sibling path.
+      - name: Checkout CLIProxyAPI host (sibling for go.mod replace)
+        uses: actions/checkout@v4
+        with:
+          repository: router-for-me/CLIProxyAPI
+          path: CLIProxyAPIPlus
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: cpa-plugin-copilot/go.mod
+          cache-dependency-path: cpa-plugin-copilot/go.sum
+
+      # Windows cgo needs a GCC toolchain. GitHub's Windows runners ship
+      # MinGW under c:\ProgramData\chocolatey\lib\mingw so add it to PATH
+      # rather than reinstalling.
+      - name: Configure MinGW (Windows only)
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $mingwBin = "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin"
+          if (Test-Path $mingwBin) {
+            echo "$mingwBin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          } else {
+            choco install mingw -y --no-progress
+          }
+          gcc --version
+
+      - name: go mod tidy
+        working-directory: cpa-plugin-copilot
+        run: go mod tidy
+
+      - name: go vet
+        working-directory: cpa-plugin-copilot
+        run: go vet ./...
+
+      - name: go test
+        working-directory: cpa-plugin-copilot
+        env:
+          CGO_ENABLED: '1'
+        run: go test ./...
+
+      - name: go build (c-shared)
+        working-directory: cpa-plugin-copilot
+        env:
+          CGO_ENABLED: '1'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.arch }}
+        run: go build -buildmode=c-shared -o cpa-plugin-copilot.${{ matrix.ext }} .
+
+      # Verify the C ABI symbols are actually exported. If any of the four
+      # `cliproxy*` entry points went missing (e.g. an unintended package
+      # rename), the host would fail to load the plugin at runtime — catching
+      # that here is far cheaper than debugging a broken pluginhost handshake.
+      - name: Verify C ABI symbols (Unix)
+        if: matrix.goos != 'windows'
+        working-directory: cpa-plugin-copilot
+        run: |
+          set -e
+          artifact="cpa-plugin-copilot.${{ matrix.ext }}"
+          for sym in cliproxy_plugin_init cliproxyPluginCall cliproxyPluginFree cliproxyPluginShutdown; do
+            if ! nm "$artifact" 2>/dev/null | grep -qE "T _?$sym"; then
+              echo "::error::missing exported symbol: $sym"
+              exit 1
+            fi
+          done
+          echo "All 4 C ABI symbols present in $artifact"
+
+      - name: Verify C ABI symbols (Windows)
+        if: matrix.goos == 'windows'
+        working-directory: cpa-plugin-copilot
+        shell: pwsh
+        run: |
+          $artifact = "cpa-plugin-copilot.${{ matrix.ext }}"
+          $required = @('cliproxy_plugin_init','cliproxyPluginCall','cliproxyPluginFree','cliproxyPluginShutdown')
+          $exports = dumpbin /EXPORTS $artifact 2>&1 | Out-String
+          foreach ($sym in $required) {
+            if ($exports -notmatch [regex]::Escape($sym)) {
+              Write-Error "missing exported symbol: $sym"
+              exit 1
+            }
+          }
+          Write-Output "All 4 C ABI symbols present in $artifact"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpa-plugin-copilot-${{ matrix.goos }}-${{ matrix.arch }}
+          path: cpa-plugin-copilot/cpa-plugin-copilot.${{ matrix.ext }}
+          if-no-files-found: error
+          retention-days: 14
