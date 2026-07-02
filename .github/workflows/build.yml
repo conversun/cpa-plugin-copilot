@@ -119,18 +119,22 @@ jobs:
       - name: Verify C ABI symbols (Windows)
         if: matrix.goos == 'windows'
         working-directory: cpa-plugin-copilot
-        shell: pwsh
+        shell: bash
+        # GitHub's Windows runners do not ship MSVC's `dumpbin`. MinGW's
+        # binutils (which we already put on PATH for CGo) provides `nm`,
+        # which reads a Windows DLL export table just as well. Using bash
+        # here also lets us share the exact same grep loop the Unix jobs
+        # use so there is one source of truth for the C ABI symbol list.
         run: |
-          $artifact = "cpa-plugin-copilot.${{ matrix.ext }}"
-          $required = @('cliproxy_plugin_init','cliproxyPluginCall','cliproxyPluginFree','cliproxyPluginShutdown')
-          $exports = dumpbin /EXPORTS $artifact 2>&1 | Out-String
-          foreach ($sym in $required) {
-            if ($exports -notmatch [regex]::Escape($sym)) {
-              Write-Error "missing exported symbol: $sym"
+          set -e
+          artifact="cpa-plugin-copilot.${{ matrix.ext }}"
+          for sym in cliproxy_plugin_init cliproxyPluginCall cliproxyPluginFree cliproxyPluginShutdown; do
+            if ! nm "$artifact" 2>/dev/null | grep -qE "T _?$sym"; then
+              echo "::error::missing exported symbol: $sym"
               exit 1
-            }
-          }
-          Write-Output "All 4 C ABI symbols present in $artifact"
+            fi
+          done
+          echo "All 4 C ABI symbols present in $artifact"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
