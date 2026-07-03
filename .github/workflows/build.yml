@@ -23,22 +23,6 @@ jobs:
             goos: linux
             arch: amd64
             ext: so
-          - os: ubuntu-24.04-arm
-            goos: linux
-            arch: arm64
-            ext: so
-          - os: macos-13
-            goos: darwin
-            arch: amd64
-            ext: dylib
-          - os: macos-latest
-            goos: darwin
-            arch: arm64
-            ext: dylib
-          - os: windows-latest
-            goos: windows
-            arch: amd64
-            ext: dll
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -60,21 +44,6 @@ jobs:
         with:
           go-version-file: cpa-plugin-copilot/go.mod
           cache-dependency-path: cpa-plugin-copilot/go.sum
-
-      # Windows cgo needs a GCC toolchain. GitHub's Windows runners ship
-      # MinGW under c:\ProgramData\chocolatey\lib\mingw so add it to PATH
-      # rather than reinstalling.
-      - name: Configure MinGW (Windows only)
-        if: matrix.goos == 'windows'
-        shell: pwsh
-        run: |
-          $mingwBin = "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin"
-          if (Test-Path $mingwBin) {
-            echo "$mingwBin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          } else {
-            choco install mingw -y --no-progress
-          }
-          gcc --version
 
       - name: go mod tidy
         working-directory: cpa-plugin-copilot
@@ -102,29 +71,8 @@ jobs:
       # `cliproxy*` entry points went missing (e.g. an unintended package
       # rename), the host would fail to load the plugin at runtime — catching
       # that here is far cheaper than debugging a broken pluginhost handshake.
-      - name: Verify C ABI symbols (Unix)
-        if: matrix.goos != 'windows'
+      - name: Verify C ABI symbols
         working-directory: cpa-plugin-copilot
-        run: |
-          set -e
-          artifact="cpa-plugin-copilot.${{ matrix.ext }}"
-          for sym in cliproxy_plugin_init cliproxyPluginCall cliproxyPluginFree cliproxyPluginShutdown; do
-            if ! nm "$artifact" 2>/dev/null | grep -qE "T _?$sym"; then
-              echo "::error::missing exported symbol: $sym"
-              exit 1
-            fi
-          done
-          echo "All 4 C ABI symbols present in $artifact"
-
-      - name: Verify C ABI symbols (Windows)
-        if: matrix.goos == 'windows'
-        working-directory: cpa-plugin-copilot
-        shell: bash
-        # GitHub's Windows runners do not ship MSVC's `dumpbin`. MinGW's
-        # binutils (which we already put on PATH for CGo) provides `nm`,
-        # which reads a Windows DLL export table just as well. Using bash
-        # here also lets us share the exact same grep loop the Unix jobs
-        # use so there is one source of truth for the C ABI symbol list.
         run: |
           set -e
           artifact="cpa-plugin-copilot.${{ matrix.ext }}"
