@@ -86,11 +86,12 @@ func handleAuthLoginStart(ctx context.Context, raw []byte) ([]byte, error) {
 
 	expiresAt := time.Now().Add(time.Duration(deviceCode.ExpiresIn) * time.Second)
 
+	fmt.Printf("\n=================================\n GITHUB COPILOT LOGIN\n USER CODE: %s\n VISIT:     %s\n=================================\n", deviceCode.UserCode, deviceCode.VerificationURI)
 	log.Infof("copilot login started: user_code=%s verification_uri=%s", deviceCode.UserCode, deviceCode.VerificationURI)
 
 	return okEnvelope(pluginapi.AuthLoginStartResponse{
 		Provider:  authTypeMarker,
-		URL:       deviceCode.VerificationURI + "?user_code=" + url.QueryEscape(deviceCode.UserCode),
+		URL:       deviceCode.VerificationURI + "#code=" + url.PathEscape(deviceCode.UserCode),
 		State:     deviceCode.DeviceCode,
 		ExpiresAt: expiresAt,
 		Metadata: map[string]any{
