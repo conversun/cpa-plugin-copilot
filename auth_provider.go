@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/conversun/cpa-plugin-copilot/copilot"
@@ -24,6 +25,78 @@ const authTypeMarker = "github-copilot"
 // 60-second margin gives the host enough headroom to refresh before an
 // in-flight execute request has to retry.
 const refreshSafetyMargin = 60 * time.Second
+
+// pollTracker rate-limits per-device-code polls against GitHub. The management
+// panel polls every ~3s regardless of provider, but GitHub's device flow
+// requires respecting the interval it returns (default 5s, extended to 350s+
+// after a slow_down penalty). Hitting GitHub every 3s triggers slow_down that
+// never clears, so we cache the last real poll time per device_code and
+// short-circuit to Pending when the panel polls faster than allowed.
+var (
+	pollTrackerMu sync.Mutex
+	pollTracker   = map[string]pollState{}
+)
+
+type pollState struct {
+	lastPollAt time.Time
+	interval   time.Duration
+}
+
+const (
+	pollIntervalDefault = 5 * time.Second
+	pollIntervalMax     = 60 * time.Second
+)
+
+// pollRateLimit returns true (and the caller must short-circuit to Pending)
+// when the caller is polling faster than GitHub allows. It also records the
+// caller's current attempt so the next call's gate is correctly computed.
+func pollRateLimit(state string, defaultInterval time.Duration) bool {
+	if defaultInterval <= 0 {
+		defaultInterval = pollIntervalDefault
+	}
+	pollTrackerMu.Lock()
+	defer pollTrackerMu.Unlock()
+	record, seen := pollTracker[state]
+	if !seen {
+		pollTracker[state] = pollState{lastPollAt: time.Now(), interval: defaultInterval}
+		return false
+	}
+	interval := record.interval
+	if interval < defaultInterval {
+		interval = defaultInterval
+	}
+	if time.Since(record.lastPollAt) < interval {
+		return true
+	}
+	record.lastPollAt = time.Now()
+	pollTracker[state] = record
+	return false
+}
+
+// pollExtendInterval bumps the tracked interval after GitHub returned
+// slow_down, so subsequent polls back off. The interval doubles until it
+// caps at pollIntervalMax; per-state so multiple concurrent logins don't
+// interfere.
+func pollExtendInterval(state string) {
+	pollTrackerMu.Lock()
+	defer pollTrackerMu.Unlock()
+	record := pollTracker[state]
+	if record.interval <= 0 {
+		record.interval = pollIntervalDefault
+	}
+	record.interval *= 2
+	if record.interval > pollIntervalMax {
+		record.interval = pollIntervalMax
+	}
+	pollTracker[state] = record
+}
+
+// pollForget releases the tracker slot on terminal (success/error) responses.
+func pollForget(state string) {
+	pollTrackerMu.Lock()
+	delete(pollTracker, state)
+	pollTrackerMu.Unlock()
+}
 
 // newAuthService returns a copilot.CopilotAuth built on the host-provided
 // HTTPClient when available. The pluginapi transport is `json:"-"`, so an
@@ -120,10 +193,25 @@ func handleAuthLoginPoll(ctx context.Context, raw []byte) ([]byte, error) {
 		})
 	}
 
+	// Rate-limit gate: honor GitHub's requested interval so the panel's ~3s
+	// polls don't get punished with slow_down/350s intervals.
+	interval := pollIntervalDefault
+	if req.Metadata != nil {
+		if v, ok := req.Metadata["interval"].(float64); ok && v > 0 {
+			interval = time.Duration(v) * time.Second
+		}
+	}
+	if pollRateLimit(req.State, interval) {
+		return okEnvelope(pluginapi.AuthLoginPollResponse{
+			Status:  pluginapi.AuthLoginStatusPending,
+			Message: "awaiting authorization",
+		})
+	}
+
 	authSvc := newAuthService(req.HTTPClient)
 	tokenData, exchangeErr := authSvc.DeviceClient().ExchangeDeviceCode(ctx, req.State)
 	if exchangeErr != nil {
-		return mapPollError(exchangeErr), nil
+		return mapPollError(req.State, exchangeErr), nil
 	}
 
 	userInfo, userErr := authSvc.DeviceClient().FetchUserInfo(ctx, tokenData.AccessToken)
@@ -150,12 +238,14 @@ func handleAuthLoginPoll(ctx context.Context, raw []byte) ([]byte, error) {
 	// host CLI performed before returning "authentication successful".
 	apiToken, apiErr := authSvc.GetCopilotAPIToken(ctx, tokenData.AccessToken)
 	if apiErr != nil {
+		pollForget(req.State)
 		return okEnvelope(pluginapi.AuthLoginPollResponse{
 			Status:  pluginapi.AuthLoginStatusError,
 			Message: fmt.Sprintf("copilot subscription verification failed: %v", apiErr),
 		})
 	}
 
+	pollForget(req.State)
 	authData := buildAuthData(storage, apiToken, "")
 	return okEnvelope(pluginapi.AuthLoginPollResponse{
 		Status:  pluginapi.AuthLoginStatusSuccess,
@@ -266,17 +356,27 @@ func buildAuthData(storage *copilot.CopilotTokenStorage, apiToken *copilot.Copil
 // mapPollError translates an ExchangeDeviceCode error into a Poll response
 // envelope so the host can act on it without knowing the copilot error types.
 // Anything not explicitly recognised is surfaced as Error rather than swallowed.
-func mapPollError(err error) []byte {
+func mapPollError(state string, err error) []byte {
 	var authErr *copilot.AuthenticationError
 	if errors.As(err, &authErr) {
 		switch authErr.Type {
-		case copilot.ErrAuthorizationPending.Type, copilot.ErrSlowDown.Type:
+		case copilot.ErrAuthorizationPending.Type:
+			raw, _ := okEnvelope(pluginapi.AuthLoginPollResponse{
+				Status:  pluginapi.AuthLoginStatusPending,
+				Message: authErr.Message,
+			})
+			return raw
+		case copilot.ErrSlowDown.Type:
+			// GitHub asked us to back off. Extend our local interval so subsequent
+			// panel polls short-circuit until the penalty clears.
+			pollExtendInterval(state)
 			raw, _ := okEnvelope(pluginapi.AuthLoginPollResponse{
 				Status:  pluginapi.AuthLoginStatusPending,
 				Message: authErr.Message,
 			})
 			return raw
 		case copilot.ErrDeviceCodeExpired.Type, copilot.ErrAccessDenied.Type:
+			pollForget(state)
 			raw, _ := okEnvelope(pluginapi.AuthLoginPollResponse{
 				Status:  pluginapi.AuthLoginStatusError,
 				Message: copilot.GetUserFriendlyMessage(err),
@@ -284,6 +384,7 @@ func mapPollError(err error) []byte {
 			return raw
 		}
 	}
+	pollForget(state)
 	raw, _ := okEnvelope(pluginapi.AuthLoginPollResponse{
 		Status:  pluginapi.AuthLoginStatusError,
 		Message: err.Error(),
