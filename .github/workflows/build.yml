@@ -65,7 +65,7 @@ jobs:
           CGO_ENABLED: '1'
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.arch }}
-        run: go build -buildmode=c-shared -o cpa-plugin-copilot.${{ matrix.ext }} .
+        run: go build -buildmode=c-shared -o github-copilot.${{ matrix.ext }} .
 
       # Verify the C ABI symbols are actually exported. If any of the four
       # `cliproxy*` entry points went missing (e.g. an unintended package
@@ -75,7 +75,7 @@ jobs:
         working-directory: cpa-plugin-copilot
         run: |
           set -e
-          artifact="cpa-plugin-copilot.${{ matrix.ext }}"
+          artifact="github-copilot.${{ matrix.ext }}"
           for sym in cliproxy_plugin_init cliproxyPluginCall cliproxyPluginFree cliproxyPluginShutdown; do
             if ! nm "$artifact" 2>/dev/null | grep -qE "T _?$sym"; then
               echo "::error::missing exported symbol: $sym"
@@ -87,7 +87,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cpa-plugin-copilot-${{ matrix.goos }}-${{ matrix.arch }}
-          path: cpa-plugin-copilot/cpa-plugin-copilot.${{ matrix.ext }}
+          name: github-copilot-${{ matrix.goos }}-${{ matrix.arch }}
+          path: cpa-plugin-copilot/github-copilot.${{ matrix.ext }}
           if-no-files-found: error
           retention-days: 14

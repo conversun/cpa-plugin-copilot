@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/conversun/cpa-plugin-copilot/copilot"
@@ -89,7 +90,7 @@ func handleAuthLoginStart(ctx context.Context, raw []byte) ([]byte, error) {
 
 	return okEnvelope(pluginapi.AuthLoginStartResponse{
 		Provider:  authTypeMarker,
-		URL:       deviceCode.VerificationURI,
+		URL:       deviceCode.VerificationURI + "?user_code=" + url.QueryEscape(deviceCode.UserCode),
 		State:     deviceCode.DeviceCode,
 		ExpiresAt: expiresAt,
 		Metadata: map[string]any{

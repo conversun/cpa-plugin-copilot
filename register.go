@@ -10,7 +10,7 @@ import (
 // and runtime executor lookups. Keep in sync with the host's github-copilot key.
 const (
 	pluginIdentifier = "github-copilot"
-	pluginName       = "GitHub Copilot Provider"
+	pluginName       = "GitHub Copilot"
 	pluginVersion    = "0.1.0-body-port"
 	pluginAuthor     = "conversun"
 	pluginRepo       = "https://github.com/conversun/cpa-plugin-copilot"
@@ -52,6 +52,7 @@ func pluginRegistration() registration {
 			Version:          pluginVersion,
 			Author:           pluginAuthor,
 			GitHubRepository: pluginRepo,
+			Logo:             "https://github.githubassets.com/images/modules/site/copilot/copilot.png",
 		},
 		Capabilities: registrationCapability{
 			AuthProvider:          true,
